@@ -6,7 +6,8 @@ import {
   onAuthStateChanged,
   type User,
 } from 'firebase/auth'
-import { auth } from './firebase'
+import { doc, setDoc, serverTimestamp } from 'firebase/firestore'
+import { auth, db } from './firebase'
 
 function App() {
   const [user, setUser] = useState<User | null>(null)
@@ -18,7 +19,11 @@ function App() {
 
   async function handleSignUp() {
     try {
-      await createUserWithEmailAndPassword(auth, email, password)
+      const cred = await createUserWithEmailAndPassword(auth, email, password)
+      await setDoc(doc(db, 'users', cred.user.uid), {
+        email: cred.user.email,
+        createdAt: serverTimestamp(),
+      })
       setMessage('')
     } catch (e) {
       setMessage((e as Error).message)
