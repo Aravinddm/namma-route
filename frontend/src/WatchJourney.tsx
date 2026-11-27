@@ -1,18 +1,35 @@
 import { useEffect, useState } from 'react'
-import { collection, onSnapshot, query, where } from 'firebase/firestore'
+import {
+  collection,
+  onSnapshot,
+  query,
+  where,
+  type DocumentData,
+} from 'firebase/firestore'
 import { db } from './firebase'
 import JourneyMap from './JourneyMap'
 
 type Journey = {
   destination: string
+  status: string
   lat?: number
   lng?: number
   updatedAtMs?: number
+  arrivedAtMs?: number
   routeJson?: string
   destLat?: number
   destLng?: number
   distanceKm?: number
   durationMin?: number
+}
+
+function stamp(d: DocumentData): number {
+  return (
+    d.arrivedAt?.toMillis?.() ??
+    d.updatedAt?.toMillis?.() ??
+    d.startedAt?.toMillis?.() ??
+    0
+  )
 }
 
 export default function WatchJourney({ uid }: { uid: string }) {
@@ -23,7 +40,7 @@ export default function WatchJourney({ uid }: { uid: string }) {
     const q = query(
       collection(db, 'journeys'),
       where('ownerId', '==', uid),
-      where('status', '==', 'started'),
+      where('status', 'in', ['started', 'near_destination', 'arrived']),
     )
     return onSnapshot(
       q,
@@ -32,12 +49,16 @@ export default function WatchJourney({ uid }: { uid: string }) {
           setJourney(null)
           return
         }
-        const d = snap.docs[0].data()
+        const docs = snap.docs.map((x) => x.data())
+        docs.sort((a, b) => stamp(b) - stamp(a))
+        const d = docs[0]
         setJourney({
           destination: d.destination,
+          status: d.status,
           lat: d.lastLocation?.lat,
           lng: d.lastLocation?.lng,
           updatedAtMs: d.updatedAt?.toMillis?.(),
+          arrivedAtMs: d.arrivedAt?.toMillis?.(),
           routeJson: d.routeJson,
           destLat: d.destinationLocation?.lat,
           destLng: d.destinationLocation?.lng,
@@ -53,9 +74,20 @@ export default function WatchJourney({ uid }: { uid: string }) {
   if (error) return <p>{error}</p>
   if (!journey) return <p>No active journey</p>
 
+  const statusText =
+    journey.status === 'arrived'
+      ? 'Arrived'
+      : journey.status === 'near_destination'
+        ? 'Near destination, arrival not confirmed'
+        : 'On the way'
+
   return (
     <>
+      <h2>{statusText}</h2>
       <p>Journey to: {journey.destination}</p>
+      {journey.status === 'arrived' && journey.arrivedAtMs && (
+        <p>Arrived at: {new Date(journey.arrivedAtMs).toLocaleTimeString()}</p>
+      )}
       {journey.distanceKm !== undefined && (
         <p>
           Route: {journey.distanceKm} km, about {journey.durationMin} min from the start

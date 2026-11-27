@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   createUserWithEmailAndPassword,
   signInWithEmailAndPassword,
@@ -18,6 +18,8 @@ import { auth, db } from './firebase'
 import JourneyMap from './JourneyMap'
 import WatchJourney from './WatchJourney'
 import { getRoute, searchPlaces, type Place } from './routing'
+
+const ARRIVAL_RADIUS_M = 200
 
 const TEXT = {
   en: {
@@ -44,6 +46,10 @@ const TEXT = {
     settings: 'Settings',
     language: 'Language',
     close: 'Close',
+    arrivedQ: 'Have you arrived?',
+    yesArrived: 'Yes, I have arrived',
+    notYet: 'Not yet',
+    arrivedDone: 'You have arrived. Your journey is complete.',
   },
   ta: {
     tagline: 'நம் பயணம். நம் அக்கறை.',
@@ -69,6 +75,10 @@ const TEXT = {
     settings: 'அமைப்புகள்',
     language: 'மொழி',
     close: 'மூடு',
+    arrivedQ: 'நீங்கள் வந்துவிட்டீர்களா?',
+    yesArrived: 'ஆம், வந்துவிட்டேன்',
+    notYet: 'இன்னும் இல்லை',
+    arrivedDone: 'நீங்கள் வந்து சேர்ந்துவிட்டீர்கள். உங்கள் பயணம் முடிந்தது.',
   },
   hi: {
     tagline: 'हमारी यात्रा। हमारी देखभाल।',
@@ -94,6 +104,10 @@ const TEXT = {
     settings: 'सेटिंग्स',
     language: 'भाषा',
     close: 'बंद करें',
+    arrivedQ: 'क्या आप पहुँच गए?',
+    yesArrived: 'हाँ, मैं पहुँच गया',
+    notYet: 'अभी नहीं',
+    arrivedDone: 'आप पहुँच गए। आपकी यात्रा पूरी हुई।',
   },
 }
 
@@ -112,6 +126,17 @@ function loadLang(): Lang {
   } catch {
     return 'en'
   }
+}
+
+function distanceMeters(lat1: number, lng1: number, lat2: number, lng2: number) {
+  const R = 6371000
+  const rad = (d: number) => (d * Math.PI) / 180
+  const dLat = rad(lat2 - lat1)
+  const dLng = rad(lng2 - lng1)
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(rad(lat1)) * Math.cos(rad(lat2)) * Math.sin(dLng / 2) ** 2
+  return 2 * R * Math.asin(Math.sqrt(a))
 }
 
 function App() {
@@ -133,6 +158,10 @@ function App() {
   const [routeJson, setRouteJson] = useState<string | undefined>()
   const [destPos, setDestPos] = useState<{ lat: number; lng: number } | null>(null)
   const [routeStats, setRouteStats] = useState<{ km: number; min: number } | null>(null)
+  const [nearPrompt, setNearPrompt] = useState(false)
+
+  const destRef = useRef<{ lat: number; lng: number } | null>(null)
+  const nearRef = useRef(false)
 
   const t = TEXT[lang]
 
@@ -163,16 +192,32 @@ function App() {
       navigator.geolocation.getCurrentPosition(
         async (pos) => {
           try {
-            await updateDoc(doc(db, 'journeys', journeyId), {
+            const lat = pos.coords.latitude
+            const lng = pos.coords.longitude
+            const dest = destRef.current
+            const isNear =
+              dest !== null &&
+              distanceMeters(lat, lng, dest.lat, dest.lng) <= ARRIVAL_RADIUS_M
+            const becameNear = isNear && !nearRef.current
+
+            const update: Record<string, unknown> = {
               lastLocation: {
-                lat: pos.coords.latitude,
-                lng: pos.coords.longitude,
+                lat,
+                lng,
                 heading: pos.coords.heading,
                 accuracy: pos.coords.accuracy,
               },
               updatedAt: serverTimestamp(),
-            })
-            setPosition({ lat: pos.coords.latitude, lng: pos.coords.longitude })
+            }
+            if (becameNear) update.status = 'near_destination'
+
+            await updateDoc(doc(db, 'journeys', journeyId), update)
+
+            if (becameNear) {
+              nearRef.current = true
+              setNearPrompt(true)
+            }
+            setPosition({ lat, lng })
             setLastSent(new Date().toLocaleTimeString())
           } catch (e) {
             setMessage((e as Error).message)
@@ -187,6 +232,20 @@ function App() {
     const timer = setInterval(sendLocation, 60000)
     return () => clearInterval(timer)
   }, [journeyId])
+
+  function resetJourney() {
+    setJourneyId(null)
+    setActiveDestination('')
+    setLastSent('')
+    setPosition(null)
+    setRouteJson(undefined)
+    setDestPos(null)
+    setRouteStats(null)
+    setNearPrompt(false)
+    destRef.current = null
+    nearRef.current = false
+    setMessage('')
+  }
 
   async function handleSignUp() {
     try {
@@ -265,6 +324,8 @@ function App() {
             }
           : {}),
       })
+      destRef.current = { lat: chosen.lat, lng: chosen.lng }
+      nearRef.current = false
       setJourneyId(ref.id)
       setActiveDestination(chosen.name)
       setPosition(from)
@@ -288,14 +349,22 @@ function App() {
         status: 'completed',
         endedAt: serverTimestamp(),
       })
-      setJourneyId(null)
-      setActiveDestination('')
-      setLastSent('')
-      setPosition(null)
-      setRouteJson(undefined)
-      setDestPos(null)
-      setRouteStats(null)
-      setMessage('')
+      resetJourney()
+    } catch (e) {
+      setMessage((e as Error).message)
+    }
+  }
+
+  async function confirmArrival() {
+    if (!journeyId) return
+    try {
+      await updateDoc(doc(db, 'journeys', journeyId), {
+        status: 'arrived',
+        arrivedAt: serverTimestamp(),
+        endedAt: serverTimestamp(),
+      })
+      resetJourney()
+      setMessage(t.arrivedDone)
     } catch (e) {
       setMessage((e as Error).message)
     }
@@ -344,6 +413,13 @@ function App() {
             <p>
               {t.lastSent} {lastSent || t.waiting}
             </p>
+            {nearPrompt && (
+              <div>
+                <h2>{t.arrivedQ}</h2>
+                <button onClick={confirmArrival}>{t.yesArrived}</button>
+                <button onClick={() => setNearPrompt(false)}>{t.notYet}</button>
+              </div>
+            )}
             {position && (
               <JourneyMap
                 lat={position.lat}
